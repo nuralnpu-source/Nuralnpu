@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Image Studio",
+  "description": "An application for AI-powered image editing and merchandise mockup generation using Gemini 2.5 Flash Image.",
+  "requestFramePermissions": []
+}
