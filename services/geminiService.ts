@@ -1,4 +1,5 @@
 import { GoogleGenAI, Modality, GenerateContentResponse } from "@google/genai";
+import { resizeImageBase64 } from '../utils';
 
 const initializeGemini = () => {
   if (!process.env.API_KEY) {
@@ -11,6 +12,7 @@ export const editImage = async (
   base64Image: string,
   mimeType: string,
   prompt: string,
+  outputResolution: string = 'original', // New parameter
 ): Promise<string> => {
   const ai = initializeGemini();
   try {
@@ -33,7 +35,12 @@ export const editImage = async (
 
     const generatedImagePart = response.candidates?.[0]?.content?.parts?.[0];
     if (generatedImagePart?.inlineData?.data) {
-      return generatedImagePart.inlineData.data;
+      let resultBase64 = generatedImagePart.inlineData.data;
+      // Apply resizing if a specific output resolution is requested
+      if (outputResolution !== 'original') {
+        resultBase64 = await resizeImageBase64(resultBase64, mimeType, outputResolution);
+      }
+      return resultBase64;
     }
     throw new Error('No image data found in the response.');
   } catch (error) {
@@ -45,6 +52,7 @@ export const editImage = async (
 export const removeImageBackground = async (
   base64Image: string,
   mimeType: string,
+  outputResolution: string = 'original', // New parameter
 ): Promise<string> => {
   const ai = initializeGemini();
   try {
@@ -67,7 +75,12 @@ export const removeImageBackground = async (
 
     const generatedImagePart = response.candidates?.[0]?.content?.parts?.[0];
     if (generatedImagePart?.inlineData?.data) {
-      return generatedImagePart.inlineData.data;
+      let resultBase64 = generatedImagePart.inlineData.data;
+      // Apply resizing if a specific output resolution is requested
+      if (outputResolution !== 'original') {
+        resultBase64 = await resizeImageBase64(resultBase64, mimeType, outputResolution);
+      }
+      return resultBase64;
     }
     throw new Error('No image data found in the response for background removal.');
   } catch (error) {

@@ -1,7 +1,7 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import ImageUploader from './ImageUploader';
 import { editImage, removeImageBackground } from '../services/geminiService';
-import { createImageUrl, fileToBase64 } from '../utils'; // Import fileToBase64 from utils
+import { createImageUrl, fileToBase64 } from '../utils';
 import ReactCrop, {
   centerCrop,
   makeAspectCrop,
@@ -72,15 +72,20 @@ function dataURLtoFile(dataurl: string, filename: string): File {
   return new File([u8arr], filename, {type:mime});
 }
 
+interface ImageState {
+  base64: string;
+  mimeType: string;
+}
 
 const ImageEditor: React.FC = () => {
-  const [originalImageBase64, setOriginalImageBase64] = useState<string | undefined>(undefined);
-  const [originalImageMimeType, setOriginalImageMimeType] = useState<string | undefined>(undefined);
-  const [editedImageBase64, setEditedImageBase64] = useState<string | undefined>(undefined);
+  const [imageHistory, setImageHistory] = useState<ImageState[]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+
   const [prompt, setPrompt] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const [selectedFilter, setSelectedFilter] = useState<string | null>(null);
+  const [outputResolution, setOutputResolution] = useState<string>('original'); // New state for resolution
 
   // Cropping states
   const imgRef = useRef<HTMLImageElement>(null);
@@ -90,6 +95,48 @@ const ImageEditor: React.FC = () => {
   const [isCropping, setIsCropping] = useState<boolean>(false);
   const [imageToCropSrc, setImageToCropSrc] = useState<string | undefined>(undefined);
   const [imageToCropMimeType, setImageToCropMimeType] = useState<string | undefined>(undefined);
+
+  // Logo Overlay states
+  const [logoBase64, setLogoBase64] = useState<string | undefined>(undefined);
+  const [logoMimeType, setLogoMimeType] = useState<string | undefined>(undefined);
+  const [showLogoOverlay, setShowLogoOverlay] = useState<boolean>(false);
+  const [logoScale, setLogoScale] = useState<number>(0.3); // 0.1 to 1.0, relative to image width/height
+  const [logoPosition, setLogoPosition] = useState<{ x: number; y: number }>({ x: 50, y: 50 }); // % from top-left
+  const [isDraggingLogo, setIsDraggingLogo] = useState<boolean>(false);
+  const logoRef = useRef<HTMLImageElement>(null);
+  const resultImageContainerRef = useRef<HTMLDivElement>(null);
+
+  const currentImageState = imageHistory[historyIndex];
+  const currentDisplayImageSrc = currentImageState
+    ? createImageUrl(currentImageState.base64, currentImageState.mimeType)
+    : undefined;
+  const currentDisplayImageBase64 = currentImageState?.base64;
+  const currentDisplayImageMimeType = currentImageState?.mimeType;
+
+  const resetLogoOverlayStates = useCallback(() => {
+    setLogoBase64(undefined);
+    setLogoMimeType(undefined);
+    setShowLogoOverlay(false);
+    setLogoScale(0.3);
+    setLogoPosition({ x: 50, y: 50 });
+    setIsDraggingLogo(false);
+  }, []);
+
+  const resetEditingStates = useCallback(() => {
+    setPrompt('');
+    setSelectedFilter(null);
+    setOutputResolution('original');
+    resetLogoOverlayStates();
+  }, [resetLogoOverlayStates]);
+
+  const pushToHistory = useCallback((base64: string, mimeType: string) => {
+    setImageHistory(prevHistory => {
+      // Truncate history if we're not at the end (i.e., we undid some actions)
+      const newHistory = prevHistory.slice(0, historyIndex + 1);
+      return [...newHistory, { base64, mimeType }];
+    });
+    setHistoryIndex(prevIndex => prevIndex + 1);
+  }, [historyIndex]);
 
   const onImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
     const { width, height } = e.currentTarget;
@@ -109,15 +156,22 @@ const ImageEditor: React.FC = () => {
   }, []);
 
   const handleImageUpload = useCallback((base64: string, mimeType: string) => {
-    setOriginalImageBase64(base64);
-    setOriginalImageMimeType(mimeType);
-    setEditedImageBase64(undefined); // Clear edited image on new upload
+    pushToHistory(base64, mimeType);
+    resetEditingStates();
     setError(undefined);
-    setSelectedFilter(null); // Reset filter on new upload
+  }, [pushToHistory, resetEditingStates]);
+
+  const handleLogoUpload = useCallback((base64: string, mimeType: string) => {
+    setLogoBase64(base64);
+    setLogoMimeType(mimeType);
+    setShowLogoOverlay(true); // Show logo by default on upload
+    setLogoScale(0.3); // Reset scale
+    setLogoPosition({ x: 50, y: 50 }); // Reset position to center initially
+    setError(undefined);
   }, []);
 
   const handleEditImage = useCallback(async () => {
-    if (!originalImageBase64 || !originalImageMimeType || !prompt.trim()) {
+    if (!currentDisplayImageBase64 || !currentDisplayImageMimeType || !prompt.trim()) {
       setError('Please upload an image and enter a prompt.');
       return;
     }
@@ -125,20 +179,19 @@ const ImageEditor: React.FC = () => {
     setIsLoading(true);
     setError(undefined);
     try {
-      const resultBase64 = await editImage(originalImageBase64, originalImageMimeType, prompt);
-      setEditedImageBase64(resultBase64);
-      setSelectedFilter(null); // Reset filter after AI edit
+      const resultBase64 = await editImage(currentDisplayImageBase64, currentDisplayImageMimeType, prompt, outputResolution);
+      pushToHistory(resultBase64, currentDisplayImageMimeType);
+      resetEditingStates();
     } catch (e: any) {
       console.error('Failed to edit image:', e);
       setError(`Failed to edit image: ${e.message || 'Unknown error'}. Please try again.`);
-      setEditedImageBase64(undefined);
     } finally {
       setIsLoading(false);
     }
-  }, [originalImageBase64, originalImageMimeType, prompt]);
+  }, [currentDisplayImageBase64, currentDisplayImageMimeType, prompt, outputResolution, pushToHistory, resetEditingStates]);
 
   const handleRemoveBackground = useCallback(async () => {
-    if (!originalImageBase64 || !originalImageMimeType) {
+    if (!currentDisplayImageBase64 || !currentDisplayImageMimeType) {
       setError('Please upload an image to remove its background.');
       return;
     }
@@ -146,32 +199,27 @@ const ImageEditor: React.FC = () => {
     setIsLoading(true);
     setError(undefined);
     try {
-      const resultBase64 = await removeImageBackground(originalImageBase64, originalImageMimeType);
-      setEditedImageBase64(resultBase64);
-      setSelectedFilter(null); // Reset filter after background removal
+      const resultBase64 = await removeImageBackground(currentDisplayImageBase64, currentDisplayImageMimeType, outputResolution);
+      pushToHistory(resultBase64, currentDisplayImageMimeType);
+      resetEditingStates();
     } catch (e: any) {
       console.error('Failed to remove background:', e);
       setError(`Failed to remove background: ${e.message || 'Unknown error'}. Please try again.`);
-      setEditedImageBase64(undefined);
     } finally {
       setIsLoading(false);
     }
-  }, [originalImageBase64, originalImageMimeType]);
+  }, [currentDisplayImageBase64, currentDisplayImageMimeType, outputResolution, pushToHistory, resetEditingStates]);
 
   const handleStartCropping = useCallback(() => {
-    const currentImage = editedImageBase64 || originalImageBase64;
-    const currentMimeType = originalImageMimeType; // Mime type typically doesn't change with edit, use original
-
-    if (currentImage && currentMimeType) {
-      setImageToCropSrc(createImageUrl(currentImage, currentMimeType));
-      setImageToCropMimeType(currentMimeType);
+    if (currentDisplayImageBase64 && currentDisplayImageMimeType) {
+      setImageToCropSrc(createImageUrl(currentDisplayImageBase64, currentDisplayImageMimeType));
+      setImageToCropMimeType(currentDisplayImageMimeType);
       setIsCropping(true);
       setError(undefined);
     } else {
       setError('Please upload an image first to crop.');
     }
-  }, [originalImageBase64, originalImageMimeType, editedImageBase64]);
-
+  }, [currentDisplayImageBase64, currentDisplayImageMimeType]);
 
   const handleApplyCrop = useCallback(async () => {
     if (imgRef.current && previewCanvasRef.current && completedCrop) {
@@ -186,15 +234,13 @@ const ImageEditor: React.FC = () => {
 
       try {
         const { base64, mimeType } = await fileToBase64(croppedFile);
-        setOriginalImageBase64(base64);
-        setOriginalImageMimeType(mimeType);
-        setEditedImageBase64(undefined); // Clear edited image as the base has changed
+        pushToHistory(base64, mimeType);
         setIsCropping(false);
         setImageToCropSrc(undefined);
         setImageToCropMimeType(undefined);
         setCompletedCrop(undefined);
         setCrop(undefined);
-        setSelectedFilter(null); // Reset filter after cropping
+        resetEditingStates();
       } catch (e: any) {
         console.error('Error processing cropped image:', e);
         setError(`Failed to process cropped image: ${e.message || 'Unknown error'}.`);
@@ -202,7 +248,7 @@ const ImageEditor: React.FC = () => {
     } else {
       setError('Could not apply crop. Please ensure an image is loaded and a crop area is selected.');
     }
-  }, [completedCrop, imageToCropMimeType]);
+  }, [completedCrop, imageToCropMimeType, pushToHistory, resetEditingStates]);
 
   const handleCancelCrop = useCallback(() => {
     setIsCropping(false);
@@ -214,10 +260,7 @@ const ImageEditor: React.FC = () => {
   }, []);
 
   const applyFilterToImage = useCallback(async (filterName: string) => {
-    const currentImage = editedImageBase64 || originalImageBase64;
-    const currentMimeType = originalImageMimeType;
-
-    if (!currentImage || !currentMimeType) {
+    if (!currentDisplayImageBase64 || !currentDisplayImageMimeType) {
       setError('No image to apply filter to.');
       return;
     }
@@ -227,8 +270,8 @@ const ImageEditor: React.FC = () => {
 
     try {
       const img = new Image();
-      img.src = createImageUrl(currentImage, currentMimeType);
-      img.crossOrigin = 'Anonymous'; 
+      img.src = createImageUrl(currentDisplayImageBase64, currentDisplayImageMimeType);
+      img.crossOrigin = 'Anonymous';
 
       img.onload = async () => {
         const canvas = document.createElement('canvas');
@@ -274,10 +317,11 @@ const ImageEditor: React.FC = () => {
           ctx.putImageData(imageData, 0, 0);
         }
 
-        const newBase64 = canvas.toDataURL(currentMimeType).split(',')[1];
-        setEditedImageBase64(newBase64);
+        const newBase64 = canvas.toDataURL(currentDisplayImageMimeType).split(',')[1];
+        pushToHistory(newBase64, currentDisplayImageMimeType);
         setSelectedFilter(filterName);
         setIsLoading(false);
+        resetLogoOverlayStates();
       };
 
       img.onerror = () => {
@@ -288,14 +332,160 @@ const ImageEditor: React.FC = () => {
       setError(`Failed to apply filter: ${e.message || 'Unknown error'}.`);
       setIsLoading(false);
     }
-  }, [editedImageBase64, originalImageBase64, originalImageMimeType]);
+  }, [currentDisplayImageBase64, currentDisplayImageMimeType, pushToHistory, resetLogoOverlayStates]);
+
+  // Logo Dragging Logic
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    if (!logoRef.current || !resultImageContainerRef.current) return;
+    e.preventDefault();
+    setIsDraggingLogo(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDraggingLogo || !logoRef.current || !resultImageContainerRef.current) return;
+
+    const containerRect = resultImageContainerRef.current.getBoundingClientRect();
+    const logoRect = logoRef.current.getBoundingClientRect();
+
+    let newX = e.clientX - containerRect.left - (logoRect.width / 2);
+    let newY = e.clientY - containerRect.top - (logoRect.height / 2);
+
+    // Constrain movement within the container
+    newX = Math.max(0, Math.min(newX, containerRect.width - logoRect.width));
+    newY = Math.max(0, Math.min(newY, containerRect.height - logoRect.height));
+
+    // Convert to percentage
+    setLogoPosition({
+      x: (newX / containerRect.width) * 100,
+      y: (newY / containerRect.height) * 100,
+    });
+  }, [isDraggingLogo]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDraggingLogo(false);
+  }, []);
+
+  useEffect(() => {
+    // Attach and detach global mousemove/mouseup listeners for dragging
+    if (isDraggingLogo) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    } else {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingLogo, handleMouseMove, handleMouseUp]);
+
+
+  const handleApplyLogoOverlay = useCallback(async () => {
+    if (!currentDisplayImageBase64 || !currentDisplayImageMimeType || !logoBase64 || !logoMimeType || !logoRef.current) {
+      setError('Please ensure a main image and a logo are loaded before applying the overlay.');
+      return;
+    }
+
+    setIsLoading(true);
+    setError(undefined);
+
+    try {
+      const mainImgElement = new Image();
+      mainImgElement.src = createImageUrl(currentDisplayImageBase64, currentDisplayImageMimeType);
+      mainImgElement.crossOrigin = 'Anonymous';
+
+      mainImgElement.onload = async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = mainImgElement.width;
+        canvas.height = mainImgElement.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          throw new Error('Could not get canvas 2D context for logo overlay.');
+        }
+
+        ctx.drawImage(mainImgElement, 0, 0); // Draw main image first
+
+        // Get the natural size of the logo itself, not its scaled size in the DOM
+        const naturalLogoWidth = logoRef.current.naturalWidth;
+        const naturalLogoHeight = logoRef.current.naturalHeight;
+
+        // Calculate logo's desired display width/height based on logoScale
+        // For simplicity, let's scale relative to the main image's width for now.
+        // A more complex approach might involve comparing logo to min(width, height) or average.
+        const scaledLogoWidth = naturalLogoWidth * logoScale;
+        const scaledLogoHeight = naturalLogoHeight * logoScale;
+
+        // Calculate position based on percentages and canvas dimensions
+        const logoX = (logoPosition.x / 100) * canvas.width;
+        const logoY = (logoPosition.y / 100) * canvas.height;
+
+        ctx.drawImage(logoRef.current, logoX, logoY, scaledLogoWidth, scaledLogoHeight); // Draw logo on top
+
+        const newBase64 = canvas.toDataURL(currentDisplayImageMimeType).split(',')[1];
+        pushToHistory(newBase64, currentDisplayImageMimeType);
+        setShowLogoOverlay(false); // Hide overlay after baking it in
+        setIsLoading(false);
+      };
+
+      mainImgElement.onerror = () => {
+        throw new Error('Failed to load main image for logo overlay application.');
+      };
+    } catch (e: any) {
+      console.error('Failed to apply logo overlay:', e);
+      setError(`Failed to apply logo overlay: ${e.message || 'Unknown error'}.`);
+      setIsLoading(false);
+    }
+  }, [currentDisplayImageBase64, currentDisplayImageMimeType, logoBase64, logoMimeType, logoScale, logoPosition, pushToHistory]);
+
+  const handleUndo = useCallback(() => {
+    if (historyIndex > 0) {
+      setHistoryIndex(prevIndex => prevIndex - 1);
+      setError(undefined);
+      resetEditingStates();
+    }
+  }, [historyIndex, resetEditingStates]);
+
+  const handleRedo = useCallback(() => {
+    if (historyIndex < imageHistory.length - 1) {
+      setHistoryIndex(prevIndex => prevIndex + 1);
+      setError(undefined);
+      resetEditingStates();
+    }
+  }, [historyIndex, imageHistory.length, resetEditingStates]);
 
 
   return (
     <div className="flex flex-col lg:flex-row gap-6 p-4">
       <div className="flex-1 space-y-6">
         <h2 className="text-2xl font-bold text-gray-800">Edit Your Image</h2>
-        <ImageUploader label="Source Image" onImageUpload={handleImageUpload} />
+        <ImageUploader
+          label="Source Image"
+          onImageUpload={handleImageUpload}
+          currentImageBase64={currentDisplayImageBase64}
+          currentImageMimeType={currentDisplayImageMimeType}
+        />
+
+        <div className="flex gap-4 mt-6">
+          <button
+            onClick={handleUndo}
+            className="flex-1 bg-gray-500 text-white py-3 rounded-md text-lg font-semibold hover:bg-gray-600 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={historyIndex <= 0 || isLoading || isCropping}
+            aria-label="Undo last change"
+          >
+            Undo
+          </button>
+          <button
+            onClick={handleRedo}
+            className="flex-1 bg-gray-500 text-white py-3 rounded-md text-lg font-semibold hover:bg-gray-600 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={historyIndex >= imageHistory.length - 1 || isLoading || isCropping}
+            aria-label="Redo last undone change"
+          >
+            Redo
+          </button>
+        </div>
+
 
         <div>
           <label htmlFor="prompt" className="block text-sm font-medium text-gray-700 mb-2">
@@ -308,15 +498,37 @@ const ImageEditor: React.FC = () => {
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="e.g., Add a retro filter, Change sky to sunset"
             className="w-full p-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder-gray-500"
-            disabled={isLoading || isCropping}
+            disabled={isLoading || isCropping || !currentDisplayImageBase64}
+            aria-label="Image editing prompt"
           />
+        </div>
+
+        {/* Resolution Selection */}
+        <div className="mt-6">
+          <h3 className="text-xl font-bold text-gray-800 mb-3">Output Resolution</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {['original', '720p', '1080p', '4K'].map((resolution) => (
+              <button
+                key={resolution}
+                onClick={() => setOutputResolution(resolution)}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200
+                            ${outputResolution === resolution ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}
+                            disabled:opacity-50 disabled:cursor-not-allowed`}
+                disabled={isLoading || isCropping || !currentDisplayImageBase64}
+                aria-pressed={outputResolution === resolution}
+              >
+                {resolution.charAt(0).toUpperCase() + resolution.slice(1).replace('original', 'Original (no resize)')}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex flex-col sm:flex-row gap-4">
           <button
             onClick={handleRemoveBackground}
             className="flex-1 bg-purple-600 text-white py-3 rounded-md text-lg font-semibold hover:bg-purple-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
-            disabled={isLoading || isCropping || !originalImageBase64}
+            disabled={isLoading || isCropping || !currentDisplayImageBase64}
+            aria-label="Remove background from image"
           >
             {isLoading ? ( // Using isLoading for both buttons, so it will show a single spinner if either is active.
               <svg className="animate-spin h-5 w-5 text-white mr-3" viewBox="0 0 24 24">
@@ -330,7 +542,8 @@ const ImageEditor: React.FC = () => {
           <button
             onClick={handleEditImage}
             className="flex-1 bg-blue-600 text-white py-3 rounded-md text-lg font-semibold hover:bg-blue-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
-            disabled={isLoading || isCropping || !originalImageBase64 || !prompt.trim()}
+            disabled={isLoading || isCropping || !currentDisplayImageBase64 || !prompt.trim()}
+            aria-label="Generate edited image based on prompt"
           >
             {isLoading ? (
               <svg className="animate-spin h-5 w-5 text-white mr-3" viewBox="0 0 24 24">
@@ -342,11 +555,12 @@ const ImageEditor: React.FC = () => {
             )}
           </button>
         </div>
-        {(originalImageBase64 || editedImageBase64) && (
+        {currentDisplayImageBase64 && (
           <button
             onClick={handleStartCropping}
             className="w-full bg-indigo-600 text-white py-3 rounded-md text-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
             disabled={isLoading || isCropping}
+            aria-label="Open image cropping tool"
           >
             Crop Image
           </button>
@@ -362,12 +576,70 @@ const ImageEditor: React.FC = () => {
                 className={`px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200
                             ${selectedFilter === filter ? 'bg-indigo-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}
                             disabled:opacity-50 disabled:cursor-not-allowed`}
-                disabled={isLoading || isCropping || (!originalImageBase64 && !editedImageBase64)}
+                disabled={isLoading || isCropping || !currentDisplayImageBase64}
+                aria-pressed={selectedFilter === filter}
               >
                 {filter.charAt(0).toUpperCase() + filter.slice(1).replace('none', 'Original')}
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Logo Overlay Section */}
+        <div className="mt-6 p-4 border border-gray-200 rounded-lg bg-white shadow-sm">
+          <h3 className="text-xl font-bold text-gray-800 mb-3">Logo Overlay</h3>
+          <ImageUploader label="Upload Logo" onImageUpload={handleLogoUpload} currentImageBase64={logoBase64} currentImageMimeType={logoMimeType}/>
+          {logoBase64 && (
+            <div className="mt-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <label htmlFor="showLogo" className="text-base font-medium text-gray-700 cursor-pointer">
+                  Show Logo Overlay
+                </label>
+                <input
+                  type="checkbox"
+                  id="showLogo"
+                  checked={showLogoOverlay}
+                  onChange={(e) => setShowLogoOverlay(e.target.checked)}
+                  className="form-checkbox h-5 w-5 text-blue-600 rounded focus:ring-blue-500"
+                  disabled={isLoading || isCropping}
+                  aria-label="Toggle logo overlay visibility"
+                />
+              </div>
+
+              {showLogoOverlay && (
+                <>
+                  <div>
+                    <label htmlFor="logoSize" className="block text-sm font-medium text-gray-700 mb-2">
+                      Logo Size: {Math.round(logoScale * 100)}%
+                    </label>
+                    <input
+                      id="logoSize"
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={logoScale}
+                      onChange={(e) => setLogoScale(Number(e.target.value))}
+                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-sm"
+                      disabled={isLoading || isCropping}
+                      aria-valuenow={logoScale * 100}
+                      aria-valuemin={10}
+                      aria-valuemax={100}
+                      aria-label="Adjust logo size"
+                    />
+                  </div>
+                  <button
+                    onClick={handleApplyLogoOverlay}
+                    className="w-full bg-orange-600 text-white py-3 rounded-md text-lg font-semibold hover:bg-orange-700 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                    disabled={isLoading || isCropping || !currentDisplayImageSrc || !logoBase64}
+                    aria-label="Apply logo overlay to main image"
+                  >
+                    Apply Logo Overlay
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {error && (
@@ -379,18 +651,33 @@ const ImageEditor: React.FC = () => {
 
       <div className="flex-1 flex flex-col items-center justify-center bg-gray-50 p-4 rounded-lg shadow-inner min-h-[300px] lg:min-h-[auto]">
         <h3 className="text-xl font-bold text-gray-800 mb-4">Result</h3>
-        {(editedImageBase64 && originalImageMimeType) ? (
-          <img
-            src={createImageUrl(editedImageBase64, originalImageMimeType)}
-            alt="Edited"
-            className="max-w-full h-auto max-h-[500px] object-contain rounded-md shadow-lg border border-gray-200"
-          />
-        ) : (originalImageBase64 && originalImageMimeType) ? (
-          <img
-            src={createImageUrl(originalImageBase64, originalImageMimeType)}
-            alt="Original"
-            className="max-w-full h-auto max-h-[500px] object-contain rounded-md shadow-lg border border-gray-200"
-          />
+        {currentDisplayImageSrc ? (
+          <div ref={resultImageContainerRef} className="relative max-w-full h-auto max-h-[500px] object-contain rounded-md shadow-lg border border-gray-200 group">
+            <img
+              src={currentDisplayImageSrc}
+              alt="Edited"
+              className="max-w-full h-auto block"
+            />
+            {showLogoOverlay && logoBase64 && logoMimeType && (
+              <img
+                ref={logoRef}
+                src={createImageUrl(logoBase64, logoMimeType)}
+                alt="Logo Overlay"
+                className={`absolute cursor-grab ${isDraggingLogo ? 'cursor-grabbing border-2 border-blue-500 shadow-lg' : 'hover:border-2 hover:border-blue-300'}`}
+                style={{
+                  left: `${logoPosition.x}%`,
+                  top: `${logoPosition.y}%`,
+                  transform: 'translate(-50%, -50%)', // Center the logo on the cursor position
+                  width: `${logoScale * 100}%`, // Adjust based on result image width
+                  maxWidth: '100%',
+                  height: 'auto',
+                }}
+                onMouseDown={handleMouseDown}
+                draggable="false" // Prevent native browser drag
+                aria-label="Draggable logo overlay"
+              />
+            )}
+          </div>
         ) : (
           <p className="text-gray-500">Your edited image will appear here.</p>
         )}
@@ -430,6 +717,7 @@ const ImageEditor: React.FC = () => {
               <button
                 onClick={handleCancelCrop}
                 className="px-6 py-3 bg-gray-300 text-gray-800 rounded-md text-lg font-semibold hover:bg-gray-400 transition-colors duration-200"
+                aria-label="Cancel image cropping"
               >
                 Cancel
               </button>
@@ -437,6 +725,7 @@ const ImageEditor: React.FC = () => {
                 onClick={handleApplyCrop}
                 className="px-6 py-3 bg-indigo-600 text-white rounded-md text-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 disabled:opacity-50"
                 disabled={!completedCrop?.width || !completedCrop?.height}
+                aria-label="Apply crop to image"
               >
                 Apply Crop
               </button>
